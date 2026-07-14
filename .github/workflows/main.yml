@@ -35,7 +35,7 @@ jobs:
           PUBLIC_IP=$(curl -s https://ifconfig.me)
           echo "RUNNER_PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
 
-      - name: Configure WireGuard Server (TEE)
+      - name: Configure WireGuard Server
         env:
           SERVER_PRIV: ${{ env.SERVER_PRIV }}
           CLIENT_PUB: ${{ env.CLIENT_PUB }}
@@ -45,44 +45,26 @@ jobs:
           sudo mkdir -p /etc/wireguard
           sudo chmod 700 /etc/wireguard
 
-          sudo tee /etc/wireguard/wg0.conf >/dev/null <<EOF
-[Interface]
-PrivateKey = ${SERVER_PRIV}
-Address = 10.8.0.1/24
-ListenPort = 51820
-PostUp = iptables -t nat -A POSTROUTING -o ${INTERFACE} -j MASQUERADE; iptables -A FORWARD -i %i -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -o ${INTERFACE} -j MASQUERADE; iptables -D FORWARD -i %i -j ACCEPT
+          CONFIG="[Interface]\nPrivateKey = ${SERVER_PRIV}\nAddress = 10.8.0.1/24\nListenPort = 51820\nPostUp = iptables -t nat -A POSTROUTING -o ${INTERFACE} -j MASQUERADE; iptables -A FORWARD -i %i -j ACCEPT\nPostDown = iptables -t nat -D POSTROUTING -o ${INTERFACE} -j MASQUERADE; iptables -D FORWARD -i %i -j ACCEPT\n\n[Peer]\nPublicKey = ${CLIENT_PUB}\nAllowedIPs = 10.8.0.2/32"
 
-[Peer]
-PublicKey = ${CLIENT_PUB}
-AllowedIPs = 10.8.0.2/32
-EOF
+          echo -e "$CONFIG" | sudo tee /etc/wireguard/wg0.conf >/dev/null
 
           sudo chmod 600 /etc/wireguard/wg0.conf
           sudo wg-quick up wg0
 
-      - name: Generate Client Config (TEE)
+      - name: Generate Client Config
         env:
           CLIENT_PRIV: ${{ env.CLIENT_PRIV }}
           SERVER_PUB: ${{ env.SERVER_PUB }}
           RUNNER_PUBLIC_IP: ${{ env.RUNNER_PUBLIC_IP }}
         run: |
-          tee client.conf <<EOF
-[Interface]
-PrivateKey = ${CLIENT_PRIV}
-Address = 10.8.0.2/24
-DNS = 1.1.1.1, 8.8.8.8
+          CLIENTCFG="[Interface]\nPrivateKey = ${CLIENT_PRIV}\nAddress = 10.8.0.2/24\nDNS = 1.1.1.1, 8.8.8.8\n\n[Peer]\nPublicKey = ${SERVER_PUB}\nEndpoint = ${RUNNER_PUBLIC_IP}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 15"
 
-[Peer]
-PublicKey = ${SERVER_PUB}
-Endpoint = ${RUNNER_PUBLIC_IP}:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 15
-EOF
+          echo -e "$CLIENTCFG" | tee client.conf
 
-          echo "==================================================="
+          echo "================ CLIENT CONFIG ================"
           cat client.conf
-          echo "==================================================="
+          echo "==============================================="
 
       - name: NAT Keepalive Loop
         run: |
