@@ -73,10 +73,10 @@ jobs:
           fi
     
           # Authenticate with the secret token
-          loclx account login -t ${{ secrets.LOCLX_TOKEN }}
+          export ACCESS_TOKEN=${{ secrets.LOCLX_TOKEN }}
     
           # Start UDP tunnel pointing to our WireGuard server
-          loclx tunnel udp --to 127.0.0.1:51820 > loclx.log 2>&1 &
+          loclx tunnel udp --to 127.0.0.1:51820 --raw-mode > loclx.log 2>&1 &
           
           echo "Waiting for LocalXpose endpoint..."
           for i in {1..20}; do
