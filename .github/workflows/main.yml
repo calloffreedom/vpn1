@@ -1,4 +1,4 @@
-name: PURE WIREGUARD (WORKING VERSION)
+name: PURE WIREGUARD (WORKING NAT DISCOVERY)
 
 on:
   workflow_dispatch:
@@ -66,15 +66,17 @@ jobs:
           cat client.conf
           echo "==============================================="
 
-      - name: NAT Keepalive + Endpoint Refresh (WORKING)
+      - name: NAT Keepalive + Port Discovery
         env:
           CLIENT_PUB: ${{ env.CLIENT_PUB }}
-          RUNNER_PUBLIC_IP: ${{ env.RUNNER_PUBLIC_IP }}
         run: |
           sudo wg set wg0 peer ${CLIENT_PUB} persistent-keepalive 25
 
           while true; do
-            NEW_IP=$(curl -s https://ifconfig.me)
-            sudo wg set wg0 endpoint ${NEW_IP}:51820
+            sudo ping -c1 -W1 10.8.0.2 >/dev/null 2>&1
+
+            # Show NAT-mapped port
+            sudo wg show wg0 endpoints
+
             sleep 10
           done
