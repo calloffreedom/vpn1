@@ -1,4 +1,4 @@
-name: PURE WIREGUARD (NATIVE ROAMING)
+name: PURE WIREGUARD (TEE VERSION)
 
 on:
   workflow_dispatch:
@@ -9,146 +9,86 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 🚀 Install WireGuard & Tools
+      - name: Install WireGuard & Tools
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y wireguard iproute2 iptables socat curl jq
+          sudo apt-get update
+          sudo apt-get install -y wireguard iproute2 iptables socat curl
 
-      - name: ⚙️ Configure IP Forwarding (sysctl)
+      - name: Enable IP Forwarding
         run: |
-          # Ensure IPv4 forwarding is enabled
-          sudo sed -i '/^net.ipv4.ip_forward/ d' /etc/sysctl.conf
-          echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+          echo "net.ipv4.ip_forward = 1" | sudo tee /etc/sysctl.conf
           sudo sysctl -p
 
-      - name: 🔑 Generate Standard Cryptographic Keys
+      - name: Generate Keys
         run: |
           umask 077
-          mkdir -p keys
-          wg genkey | tee keys/server.key | wg pubkey > keys/server.pub
-          wg genkey | tee keys/client.key | wg pubkey > keys/client.pub
+          wg genkey | tee server.key | wg pubkey > server.pub
+          wg genkey | tee client.key | wg pubkey > client.pub
 
-          # Protect keys
-          chmod 600 keys/*.key
-          chmod 644 keys/*.pub
+          echo "SERVER_PRIV=$(cat server.key)" >> $GITHUB_ENV
+          echo "SERVER_PUB=$(cat server.pub)" >> $GITHUB_ENV
+          echo "CLIENT_PRIV=$(cat client.key)" >> $GITHUB_ENV
+          echo "CLIENT_PUB=$(cat client.pub)" >> $GITHUB_ENV
 
-          # Export to subsequent steps via GITHUB_ENV (runtime env)
-          echo "SERVER_PRIV=$(cat keys/server.key)" >> $GITHUB_ENV
-          echo "SERVER_PUB=$(cat keys/server.pub)" >> $GITHUB_ENV
-          echo "CLIENT_PRIV=$(cat keys/client.key)" >> $GITHUB_ENV
-          echo "CLIENT_PUB=$(cat keys/client.pub)" >> $GITHUB_ENV
-
-      - name: 🌐 Discover Public NAT Mapping
+      - name: Detect Public IP
         run: |
-          # Discover the runner's public IP and save for later steps
-          RUNNER_PUBLIC_IP=$(curl -s https://ifconfig.me || curl -s https://ipinfo.io/ip)
-          echo "RUNNER_PUBLIC_IP=$RUNNER_PUBLIC_IP" >> $GITHUB_ENV
-          echo "RUNNER_PUBLIC_IP=$RUNNER_PUBLIC_IP"
+          PUBLIC_IP=$(curl -s https://ifconfig.me)
+          echo "RUNNER_PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
 
-      - name: 📝 Initialize WireGuard Server
+      - name: Configure WireGuard Server (TEE)
         env:
           SERVER_PRIV: ${{ env.SERVER_PRIV }}
           CLIENT_PUB: ${{ env.CLIENT_PUB }}
         run: |
-          # Determine default interface for NAT rules
-          INTERFACE=$(ip route show default | awk '{print $5}' | head -n1)
-          if [ -z "$INTERFACE" ]; then
-            echo "Could not determine default interface" >&2
-            exit 1
-          fi
+          INTERFACE=$(ip route show default | awk '{print $5}')
 
-          # Create /etc/wireguard directory if missing
           sudo mkdir -p /etc/wireguard
           sudo chmod 700 /etc/wireguard
 
-          # Write wg0.conf using runtime variables (expand in shell)
-          sudo bash -c 'cat > /etc/wireguard/wg0.conf <<EOF
+          sudo tee /etc/wireguard/wg0.conf >/dev/null <<EOF
 [Interface]
-PrivateKey = '"$SERVER_PRIV"'
+PrivateKey = ${SERVER_PRIV}
 Address = 10.8.0.1/24
 ListenPort = 51820
-# PostUp/PostDown manage NAT and forwarding so iptables rules are tied to the interface lifecycle
-PostUp = /sbin/iptables -t nat -A POSTROUTING -o '"$INTERFACE"' -j MASQUERADE; /sbin/iptables -A FORWARD -i %i -j ACCEPT; /sbin/iptables -A FORWARD -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT
-PostDown = /sbin/iptables -t nat -D POSTROUTING -o '"$INTERFACE"' -j MASQUERADE; /sbin/iptables -D FORWARD -i %i -j ACCEPT; /sbin/iptables -D FORWARD -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -o ${INTERFACE} -j MASQUERADE; iptables -A FORWARD -i %i -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o ${INTERFACE} -j MASQUERADE; iptables -D FORWARD -i %i -j ACCEPT
 
 [Peer]
-PublicKey = '"$CLIENT_PUB"'
+PublicKey = ${CLIENT_PUB}
 AllowedIPs = 10.8.0.2/32
-EOF'
+EOF
 
-          # Secure the config and bring up the interface
           sudo chmod 600 /etc/wireguard/wg0.conf
-          sudo wg-quick up wg0 || (sudo cat /var/log/syslog || true; sudo wg show)
+          sudo wg-quick up wg0
 
-      - name: 🖥️ GENERATE CLIENT CONFIG
+      - name: Generate Client Config (TEE)
         env:
           CLIENT_PRIV: ${{ env.CLIENT_PRIV }}
           SERVER_PUB: ${{ env.SERVER_PUB }}
           RUNNER_PUBLIC_IP: ${{ env.RUNNER_PUBLIC_IP }}
         run: |
-          cat <<EOF
-===================================================
-      IMPORT THIS INTO YOUR NATIVE WIREGUARD APP
-===================================================
+          tee client.conf <<EOF
 [Interface]
-PrivateKey = $CLIENT_PRIV
+PrivateKey = ${CLIENT_PRIV}
 Address = 10.8.0.2/24
 DNS = 1.1.1.1, 8.8.8.8
 
 [Peer]
-PublicKey = $SERVER_PUB
-Endpoint = $RUNNER_PUBLIC_IP:51820
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
+PublicKey = ${SERVER_PUB}
+Endpoint = ${RUNNER_PUBLIC_IP}:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 15
 EOF
+
+          echo "==================================================="
+          cat client.conf
           echo "==================================================="
 
-      - name: 🔒 Save server keys and config (optional artifact)
-        if: always()
+      - name: NAT Keepalive Loop
         run: |
-          # Save a minimal bundle in case you want to download it from the runner
-          mkdir -p out
-          sudo cp /etc/wireguard/wg0.conf out/
-          sudo chown $USER:$USER out/wg0.conf || true
-          cp keys/* out/ || true
-          ls -l out || true
-
-      - name: 🔨 Keep NAT Port Open (UDP Punch loop)
-        env:
-          RUNNER_PUBLIC_IP: ${{ env.RUNNER_PUBLIC_IP }}
-        run: |
-          # The goal: periodically send tiny UDP packets to refresh NAT mapping.
-          # Note: binding the same source port as WireGuard (51820) can conflict with wg listening.
-          # This loop uses an ephemeral source port but refreshes the NAT mapping from the runner to public resolvers.
-          # If you need a mapping tied to source port 51820, run this on a host where you can bind that port without conflict.
           sudo nohup bash -c '
-            set -e
             while true; do
-              # Send a tiny UDP packet to multiple public resolvers to refresh NAT mapping
-              printf "keepalive\n" | socat - UDP-SENDTO:1.1.1.1:53 || true
-              printf "keepalive\n" | socat - UDP-SENDTO:8.8.8.8:53 || true
-              sleep 20
+              printf "keepalive" | socat - UDP-SENDTO:1.1.1.1:53
+              sleep 10
             done
           ' >/dev/null 2>&1 &
-
-          # Show backgrounded processes for debugging
-          ps aux | grep -E "socat .*1.1.1.1|socat .*8.8.8.8" || true
-          echo "Keepalive backgrounded (ephemeral source port)."
-
-      - name: ✅ Status Check
-        run: |
-          echo "WireGuard interface status:"
-          sudo wg show
-          echo
-          echo "IP routes:"
-          ip -4 addr show dev wg0 || true
-          ip route show || true
-
-      - name: ⚠️ Cleanup on job end (best-effort)
-        if: always()
-        run: |
-          # Attempt to bring down wg0 and remove background keepalive processes
-          sudo wg-quick down wg0 || true
-          # Kill any socat keepalive backgrounded by this job
-          pkill -f "socat - UDP-SENDTO:1.1.1.1:53" || true
-          pkill -f "socat - UDP-SENDTO:8.8.8.8:53" || true
