@@ -1,4 +1,4 @@
-name: PURE WIREGUARD (TEE VERSION)
+name: PURE WIREGUARD (NATIVE ROAMING)
 
 on:
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
           SERVER_PUB: ${{ env.SERVER_PUB }}
           RUNNER_PUBLIC_IP: ${{ env.RUNNER_PUBLIC_IP }}
         run: |
-          CLIENTCFG="[Interface]\nPrivateKey = ${CLIENT_PRIV}\nAddress = 10.8.0.2/24\nDNS = 1.1.1.1, 8.8.8.8\n\n[Peer]\nPublicKey = ${SERVER_PUB}\nEndpoint = ${RUNNER_PUBLIC_IP}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 15"
+          CLIENTCFG="[Interface]\nPrivateKey = ${CLIENT_PRIV}\nAddress = 10.8.0.2/24\nDNS = 1.1.1.1, 8.8.8.8\n\n[Peer]\nPublicKey = ${SERVER_PUB}\nEndpoint = ${RUNNER_PUBLIC_IP}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25"
 
           echo -e "$CLIENTCFG" | tee client.conf
 
@@ -66,11 +66,12 @@ jobs:
           cat client.conf
           echo "==============================================="
 
-      - name: NAT Keepalive Loop
+      - name: NAT Keepalive Loop (Working)
         run: |
           sudo nohup bash -c '
             while true; do
-              printf "keepalive" | socat - UDP-SENDTO:1.1.1.1:53
+              # Ping the client tunnel IP so WireGuard sends packets
+              sudo ping -c1 -W1 10.8.0.2 >/dev/null 2>&1
               sleep 10
             done
           ' >/dev/null 2>&1 &
