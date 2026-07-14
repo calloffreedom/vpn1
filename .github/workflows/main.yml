@@ -1,136 +1,89 @@
-name: WIREGUARD VPN (LOCALXPOSE)
+name: PURE WIREGUARD (NATIVE ROAMING)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  vpn:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-      # STREAMING_CHUNK: Installing WireGuard dependencies...
-      - name: Install WireGuard & Tools
+      - name: 🚀 Install WireGuard & Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wireguard resolvconf iptables unzip
-          echo "✅ WireGuard Installed"
-    
-      # STREAMING_CHUNK: Configuring WireGuard Server...
-      - name: Configure WireGuard Server
-        run: |
-          # Generate Server and Client Keys
-          wg genkey | tee server_private.key | wg pubkey > server_public.key
-          wg genkey | tee client_private.key | wg pubkey > client_public.key
-    
-          SERVER_PRIV=$(cat server_private.key)
-          SERVER_PUB=$(cat server_public.key)
-          CLIENT_PRIV=$(cat client_private.key)
-          CLIENT_PUB=$(cat client_public.key)
-    
-          # Dynamically detect primary interface
-          DEFAULT_IFACE=$(ip route list default | awk 'NR==1 {print $5}')
-    
-          # Configure Server Interface (wg0)
-          sudo tee /etc/wireguard/wg0.conf > /dev/null <<EOF
-          [Interface]
-          PrivateKey = $SERVER_PRIV
-          Address = 10.0.0.1/24
-          ListenPort = 51820
-          PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
-          PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
-    
-          [Peer]
-          PublicKey = $CLIENT_PUB
-          AllowedIPs = 10.0.0.2/32
-          EOF
-    
-          # Enable IP Forwarding and start VPN
-          sudo sysctl -w net.ipv4.ip_forward=1
-          sudo wg-quick up wg0
-          
-          # Save keys for the final config generation step
-          echo "$CLIENT_PRIV" > client_private.txt
-          echo "$SERVER_PUB" > server_public.txt
-    
-      # STREAMING_CHUNK: Installing and running LocalXpose...
-      - name: Start UDP Tunnel (LocalXpose)
-        run: |
-          # Download and install LocalXpose (loclx)
-          curl -sLo loclx.zip https://api.localxpose.io/api/v2/downloads/loclx-linux-amd64.zip
-          unzip loclx.zip
-          chmod +x loclx
-          sudo mv loclx /usr/local/bin/
-    
-          # LocalXpose requires an auth token to prevent UDP abuse.
-          if [ -z "${{ secrets.LOCLX_TOKEN }}" ]; then
-            echo "❌ ERROR: LocalXpose requires an auth token."
-            echo "1. Go to https://localxpose.io/ and create a free account."
-            echo "2. Copy your Access Token."
-            echo "3. Go to your GitHub Repo -> Settings -> Secrets and Variables -> Actions."
-            echo "4. Add a new secret named LOCLX_TOKEN and paste the token."
-            exit 1
-          fi
-    
-          # Authenticate with the secret token
-          export ACCESS_TOKEN=${{ secrets.LOCLX_TOKEN }}
-    
-          # Start UDP tunnel pointing to our WireGuard server
-          loclx tunnel udp --to 127.0.0.1:51820 > loclx.log 2>&1 &
-          
-          echo "Waiting for LocalXpose endpoint..."
-          for i in {1..20}; do
-            sleep 2
-            # Extract the assigned endpoint (e.g., us.loclx.io:12345) from the log
-            ENDPOINT=$(grep -oE '[a-zA-Z0-9.-]*loclx\.io:[0-9]+' loclx.log | head -n 1)
-            if [ -n "$ENDPOINT" ]; then 
-              echo "🌐 Public Endpoint Found: $ENDPOINT"
-              break
-            fi
-          done
+          sudo apt-get install -y wireguard netcat-openbsd curl
 
-          cat loclx.log
-          
-          if [ -z "$ENDPOINT" ]; then
-             echo "❌ Failed to obtain endpoint. Tunnel logs:"
-             cat loclx.log
-             exit 1
-          fi
-          
-          echo "$ENDPOINT" > endpoint.txt
-    
-      # STREAMING_CHUNK: Generating the WireGuard configuration...
-      - name: SHOW CONNECT INFO & GENERATE CONFIG
+      - name: ⚙️ Configure IP Forwarding & NAT Routing
         run: |
-          CLIENT_PRIV=$(cat client_private.txt)
-          SERVER_PUB=$(cat server_public.txt)
-          ENDPOINT=$(cat endpoint.txt)
-    
+          echo "net.ipv4.ip_forward = 1" | sudo tee -a /etc/sysctl.conf
+          sudo sysctl -p
+          
+          # Get active network interface
+          INTERFACE=$(ip route show default | awk '{print $5}')
+          
+          # Route all client internet traffic out through the runner's interface
+          sudo iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE
+          sudo iptables -A FORWARD -i wg0 -j ACCEPT
+          sudo iptables -A FORWARD -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+      - name: 🔑 Generate Standard Cryptographic Keys
+        run: |
+          umask 077
+          wg genkey | tee server.key | wg pubkey > server.pub
+          wg genkey | tee client.key | wg pubkey > client.pub
+          
+          echo "SERVER_PRIV=$(cat server.key)" >> $GITHUB_ENV
+          echo "SERVER_PUB=$(cat server.pub)" >> $GITHUB_ENV
+          echo "CLIENT_PRIV=$(cat client.key)" >> $GITHUB_ENV
+          echo "CLIENT_PUB=$(cat client.pub)" >> $GITHUB_ENV
+
+      - name: 🌐 Discover Public NAT Mapping
+        run: |
+          # Fetch the runner's external public IP address
+          PUBLIC_IP=$(curl -s https://ifconfig.me)
+          echo "RUNNER_PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+      - name: 📝 Initialize WireGuard Server
+        run: |
+          cat <<EOF | sudo tee /etc/wireguard/wg0.conf
+          [Interface]
+          PrivateKey = ${{ env.SERVER_PRIV }}
+          Address = 10.8.0.1/24
+          ListenPort = 51820
+
+          [Peer]
+          PublicKey = ${{ env.CLIENT_PUB }}
+          AllowedIPs = 10.8.0.2/32
+          EOF
+
+          sudo wg-quick up wg0
+
+      - name: 🖥️ GENERATE CLIENT CONFIG
+        run: |
           echo "==================================================="
-          echo "       WIREGUARD VPN READY (VIA LOCALXPOSE)        "
+          echo "      IMPORT THIS INTO YOUR NATIVE WIREGUARD APP   "
           echo "==================================================="
-          echo "Public Endpoint : $ENDPOINT"
+          cat <<EOF
+          [Interface]
+          PrivateKey = ${{ env.CLIENT_PRIV }}
+          Address = 10.8.0.2/24
+          DNS = 1.1.1.1, 8.8.8.8
+
+          [Peer]
+          PublicKey = ${{ env.SERVER_PUB }}
+          Endpoint = ${{ env.RUNNER_PUBLIC_IP }}:51820
+          AllowedIPs = 0.0.0.0/0
+          PersistentKeepalive = 15
+          EOF
           echo "==================================================="
-          echo ""
-          echo "👉 Save this exact configuration as 'github-vpn.conf':"
-          echo ""
-          echo "[Interface]"
-          echo "PrivateKey = $CLIENT_PRIV"
-          echo "Address = 10.0.0.2/24"
-          echo "DNS = 1.1.1.1"
-          echo ""
-          echo "[Peer]"
-          echo "PublicKey = $SERVER_PUB"
-          echo "Endpoint = $ENDPOINT"
-          echo "AllowedIPs = 0.0.0.0/0"
-          echo "PersistentKeepalive = 25"
-          echo ""
-          echo "==================================================="
-          echo "💡 HOW TO CONNECT:"
-          echo "1. Copy the configuration block above."
-          echo "2. Import it directly into the official WireGuard App."
-          echo "3. Connect! All traffic now routes through the runner."
-          echo "==================================================="
-    
-      - name: Keep Alive
-        run: sleep 21600
+
+      - name: 🔨 Keep NAT Port Open (UDP Punch loop)
+        run: |
+          echo "Running low-level UDP keep-alive to hold the firewall port open..."
+          # Continuously fires light UDP bursts to keep the Azure NAT mapping alive 
+          # so your native client can hit port 51820 directly at any time.
+          while true; do
+            echo "KeepAlive" | nc -u -w 1 8.8.8.8 53 || true
+            sleep 10
+          done
