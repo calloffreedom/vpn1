@@ -12,7 +12,7 @@ jobs:
       - name: Install WireGuard & Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wireguard iproute2 iptables socat curl
+          sudo apt-get install -y wireguard iproute2 iptables curl
 
       - name: Enable IP Forwarding
         run: |
@@ -66,12 +66,14 @@ jobs:
           cat client.conf
           echo "==============================================="
 
-      - name: NAT Keepalive Loop (Working)
+      - name: NAT Keepalive (Working)
+        env:
+          CLIENT_PUB: ${{ env.CLIENT_PUB }}
         run: |
-          sudo nohup bash -c '
-            while true; do
-              # Ping the client tunnel IP so WireGuard sends packets
-              sudo ping -c1 -W1 10.8.0.2 >/dev/null 2>&1
-              sleep 10
-            done
-          ' >/dev/null 2>&1 &
+          # This is the ONLY keepalive Azure NAT respects.
+          sudo wg set wg0 peer ${CLIENT_PUB} persistent-keepalive 25
+
+          # Keep the job alive so the server stays reachable.
+          while true; do
+            sleep 60
+          done
