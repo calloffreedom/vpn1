@@ -1,4 +1,4 @@
-name: WIREGUARD VPN (DIRECT CONNECTION)
+name: WIREGUARD VPN (LOCALXPOSE)
 
 on:
   workflow_dispatch:
@@ -9,80 +9,103 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install WireGuard
+      # STREAMING_CHUNK: Installing WireGuard dependencies...
+      - name: Install WireGuard & Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wireguard resolvconf iptables
+          sudo apt-get install -y wireguard resolvconf iptables unzip
           echo "✅ WireGuard Installed"
-
+    
+      # STREAMING_CHUNK: Configuring WireGuard Server...
       - name: Configure WireGuard Server
         run: |
           # Generate Server and Client Keys
           wg genkey | tee server_private.key | wg pubkey > server_public.key
           wg genkey | tee client_private.key | wg pubkey > client_public.key
-
+    
           SERVER_PRIV=$(cat server_private.key)
           SERVER_PUB=$(cat server_public.key)
           CLIENT_PRIV=$(cat client_private.key)
           CLIENT_PUB=$(cat client_public.key)
-
+    
+          # Dynamically detect primary interface
+          DEFAULT_IFACE=$(ip route list default | awk 'NR==1 {print $5}')
+    
           # Configure Server Interface (wg0)
-          sudo bash -c "cat > /etc/wireguard/wg0.conf <<EOF
+          sudo tee /etc/wireguard/wg0.conf > /dev/null <<EOF
           [Interface]
           PrivateKey = $SERVER_PRIV
           Address = 10.0.0.1/24
           ListenPort = 51820
-          
-          PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-          PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-
+          PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
+          PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
+    
           [Peer]
           PublicKey = $CLIENT_PUB
           AllowedIPs = 10.0.0.2/32
-          EOF"
-
-          # Enable IP Forwarding
+          EOF
+    
+          # Enable IP Forwarding and start VPN
           sudo sysctl -w net.ipv4.ip_forward=1
-
-          # Start WireGuard
           sudo wg-quick up wg0
-          echo "✅ WireGuard Server Started"
-
-          # Save client keys
+          
+          # Save keys for the final config generation step
           echo "$CLIENT_PRIV" > client_private.txt
           echo "$SERVER_PUB" > server_public.txt
-
-      - name: Start Public UDP Tunnel (Pinggy)
+    
+      # STREAMING_CHUNK: Installing and running LocalXpose...
+      - name: Start UDP Tunnel (LocalXpose)
         run: |
-          # Create a public UDP tunnel via SSH (using port 443 to bypass firewall restrictions)
-          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p 443 -R 0:localhost:51820 udp@a.pinggy.io > pinggy.log 2>&1 &
+          # Download and install LocalXpose (loclx)
+          curl -sLo loclx.zip https://api.localxpose.io/api/v2/downloads/loclx-linux-amd64.zip
+          unzip loclx.zip
+          chmod +x loclx
+          sudo mv loclx /usr/local/bin/
+    
+          # LocalXpose requires an auth token to prevent UDP abuse.
+          if [ -z "${{ secrets.LOCLX_TOKEN }}" ]; then
+            echo "❌ ERROR: LocalXpose requires an auth token."
+            echo "1. Go to https://localxpose.io/ and create a free account."
+            echo "2. Copy your Access Token."
+            echo "3. Go to your GitHub Repo -> Settings -> Secrets and Variables -> Actions."
+            echo "4. Add a new secret named LOCLX_TOKEN and paste the token."
+            exit 1
+          fi
+    
+          # Authenticate with the secret token
+          loclx account login -t ${{ secrets.LOCLX_TOKEN }}
+    
+          # Start UDP tunnel pointing to our WireGuard server
+          loclx tunnel udp --to 127.0.0.1:51820 > loclx.log 2>&1 &
           
-          echo "Waiting for public UDP endpoint..."
+          echo "Waiting for LocalXpose endpoint..."
           for i in {1..20}; do
             sleep 2
-            # Extract the raw udp:// domain:port string and strip the 'udp://' prefix
-            ENDPOINT=$(grep -oE 'udp://[a-zA-Z0-9.-]+:[0-9]+' pinggy.log | sed 's/udp:\/\///' | head -n 1)
+            # Extract the assigned endpoint (e.g., us.loclx.io:12345) from the log
+            ENDPOINT=$(grep -oE '[a-zA-Z0-9.-]*loclx\.io:[0-9]+' loclx.log | head -n 1)
             if [ -n "$ENDPOINT" ]; then 
               echo "🌐 Public Endpoint Found: $ENDPOINT"
               break
             fi
           done
+          
+          if [ -z "$ENDPOINT" ]; then
+             echo "❌ Failed to obtain endpoint. Tunnel logs:"
+             cat loclx.log
+             exit 1
+          fi
+          
           echo "$ENDPOINT" > endpoint.txt
-
+    
+      # STREAMING_CHUNK: Generating the WireGuard configuration...
       - name: SHOW CONNECT INFO & GENERATE CONFIG
         run: |
           CLIENT_PRIV=$(cat client_private.txt)
           SERVER_PUB=$(cat server_public.txt)
           ENDPOINT=$(cat endpoint.txt)
-
-          if [ -z "$ENDPOINT" ]; then
-            echo "❌ Error: Could not obtain public endpoint. Checking tunnel logs:"
-            cat pinggy.log
-            exit 1
-          fi
-
+    
           echo "==================================================="
-          echo "       WIREGUARD VPN READY (NO CLIENT TUNNEL)"
+          echo "       WIREGUARD VPN READY (VIA LOCALXPOSE)        "
           echo "==================================================="
           echo "Public Endpoint : $ENDPOINT"
           echo "==================================================="
@@ -103,10 +126,9 @@ jobs:
           echo "==================================================="
           echo "💡 HOW TO CONNECT:"
           echo "1. Copy the configuration block above."
-          echo "2. Import it directly into the official WireGuard App on"
-          echo "   your phone, laptop, or router."
+          echo "2. Import it directly into the official WireGuard App."
           echo "3. Connect! All traffic now routes through the runner."
           echo "==================================================="
-
+    
       - name: Keep Alive
         run: sleep 21600
