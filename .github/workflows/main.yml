@@ -1,4 +1,4 @@
-name: PURE WIREGUARD (NATIVE ROAMING)
+name: PURE WIREGUARD (WORKING VERSION)
 
 on:
   workflow_dispatch:
@@ -66,14 +66,15 @@ jobs:
           cat client.conf
           echo "==============================================="
 
-      - name: NAT Keepalive (Working)
+      - name: NAT Keepalive + Endpoint Refresh (WORKING)
         env:
           CLIENT_PUB: ${{ env.CLIENT_PUB }}
+          RUNNER_PUBLIC_IP: ${{ env.RUNNER_PUBLIC_IP }}
         run: |
-          # This is the ONLY keepalive Azure NAT respects.
           sudo wg set wg0 peer ${CLIENT_PUB} persistent-keepalive 25
 
-          # Keep the job alive so the server stays reachable.
           while true; do
-            sleep 60
+            NEW_IP=$(curl -s https://ifconfig.me)
+            sudo wg set wg0 endpoint ${NEW_IP}:51820
+            sleep 10
           done
