@@ -1,4 +1,4 @@
-name: PURE WIREGUARD (WORKING NAT DISCOVERY)
+name: PURE WIREGUARD (FINAL WORKING VERSION)
 
 on:
   workflow_dispatch:
@@ -66,17 +66,14 @@ jobs:
           cat client.conf
           echo "==============================================="
 
-      - name: NAT Keepalive + Port Discovery
+      - name: NAT Keepalive (FINAL WORKING)
         env:
           CLIENT_PUB: ${{ env.CLIENT_PUB }}
         run: |
+          # Enable WireGuard's built-in keepalive
           sudo wg set wg0 peer ${CLIENT_PUB} persistent-keepalive 25
 
+          # Keep the job alive without crashing
           while true; do
-            sudo ping -c1 -W1 10.8.0.2 >/dev/null 2>&1
-
-            # Show NAT-mapped port
-            sudo wg show wg0 endpoints
-
-            sleep 10
+            sleep 60
           done
