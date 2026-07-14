@@ -58,10 +58,10 @@ jobs:
           ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p 443 -R 0:localhost:51820 udp@a.pinggy.io > pinggy.log 2>&1 &
           
           echo "Waiting for public UDP endpoint..."
-          for i in {1..15}; do
+          for i in {1..20}; do
             sleep 2
-            # Extract the public URL (e.g. rnxxx-xxx.a.pinggy.link:xxxxx)
-            ENDPOINT=$(grep -oE '[a-zA-Z0-9.-]+\.pinggy\.link:[0-9]+' pinggy.log | head -n 1)
+            # Extract the raw udp:// domain:port string and strip the 'udp://' prefix
+            ENDPOINT=$(grep -oE 'udp://[a-zA-Z0-9.-]+:[0-9]+' pinggy.log | sed 's/udp:\/\///' | head -n 1)
             if [ -n "$ENDPOINT" ]; then 
               echo "🌐 Public Endpoint Found: $ENDPOINT"
               break
