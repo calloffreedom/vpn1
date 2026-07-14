@@ -1,0 +1,111 @@
+name: WIREGUARD VPN (DIRECT CONNECTION)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Install WireGuard & Playit
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wireguard resolvconf iptables curl
+          
+          # Install Playit.gg CLI
+          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg > /dev/null
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit.list
+          sudo apt-get update
+          sudo apt-get install -y playit
+          echo "✅ Dependencies Installed"
+
+      - name: Configure WireGuard Server
+        run: |
+          # Generate Server and Client Keys
+          wg genkey | tee server_private.key | wg pubkey > server_public.key
+          wg genkey | tee client_private.key | wg pubkey > client_public.key
+
+          SERVER_PRIV=$(cat server_private.key)
+          SERVER_PUB=$(cat server_public.key)
+          CLIENT_PRIV=$(cat client_private.key)
+          CLIENT_PUB=$(cat client_public.key)
+
+          # Configure Server Interface (wg0)
+          sudo bash -c "cat > /etc/wireguard/wg0.conf <<EOF
+          [Interface]
+          PrivateKey = $SERVER_PRIV
+          Address = 10.0.0.1/24
+          ListenPort = 51820
+          
+          PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+          PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+          [Peer]
+          PublicKey = $CLIENT_PUB
+          AllowedIPs = 10.0.0.2/32
+          EOF"
+
+          # Enable IP Forwarding
+          sudo sysctl -w net.ipv4.ip_forward=1
+
+          # Start WireGuard
+          sudo wg-quick up wg0
+          echo "✅ WireGuard Server Started"
+
+          # Save client keys
+          echo "$CLIENT_PRIV" > client_private.txt
+          echo "$SERVER_PUB" > server_public.txt
+
+      - name: Start Playit Tunnel (Expose UDP 51820)
+        run: |
+          # Run playit in the background and claim the tunnel automatically
+          playit setup --secret-path playit.secret &
+          sleep 5
+          
+          # Create a custom UDP mapping to Wireguard
+          playit tunnel create --type udp --port 51820 --to-port 51820 &
+          sleep 5
+          
+          # Grab the public mapping address
+          playit status > playit.log 2>&1 || true
+          cat playit.log
+
+      - name: SHOW CONNECT INFO & GENERATE CONFIG
+        run: |
+          CLIENT_PRIV=$(cat client_private.txt)
+          SERVER_PUB=$(cat server_public.txt)
+          
+          # Extract the tunnel mapping from the playit log
+          # (e.g. static-ip.playit.gg:12345)
+          ENDPOINT=$(grep -oE '[a-zA-Z0-9.-]+\.playit\.gg:[0-9]+' playit.log | head -n 1)
+
+          echo "==================================================="
+          echo "       WIREGUARD VPN READY (NO CLIENT TUNNEL)"
+          echo "==================================================="
+          echo "Tunnel Endpoint : $ENDPOINT"
+          echo "==================================================="
+          echo ""
+          echo "👉 Save this exact configuration as 'github-vpn.conf':"
+          echo ""
+          echo "[Interface]"
+          echo "PrivateKey = $CLIENT_PRIV"
+          echo "Address = 10.0.0.2/24"
+          echo "DNS = 1.1.1.1"
+          echo ""
+          echo "[Peer]"
+          echo "PublicKey = $SERVER_PUB"
+          echo "Endpoint = $ENDPOINT"
+          echo "AllowedIPs = 0.0.0.0/0"
+          echo "PersistentKeepalive = 25"
+          echo ""
+          echo "==================================================="
+          echo "💡 HOW TO CONNECT:"
+          echo "1. Import 'github-vpn.conf' directly into your default"
+          echo "   WireGuard client (Mobile, Mac, Windows, Linux)."
+          echo "2. Click Connect. No helper software required!"
+          echo "==================================================="
+
+      - name: Keep Alive
+        run: sleep 21600
