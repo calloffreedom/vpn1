@@ -9,17 +9,11 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install WireGuard & Playit
+      - name: Install WireGuard
         run: |
           sudo apt-get update
-          sudo apt-get install -y wireguard resolvconf iptables curl
-          
-          # Install Playit.gg CLI
-          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg > /dev/null
-          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit.list
-          sudo apt-get update
-          sudo apt-get install -y playit
-          echo "✅ Dependencies Installed"
+          sudo apt-get install -y wireguard resolvconf iptables
+          echo "✅ WireGuard Installed"
 
       - name: Configure WireGuard Server
         run: |
@@ -58,33 +52,39 @@ jobs:
           echo "$CLIENT_PRIV" > client_private.txt
           echo "$SERVER_PUB" > server_public.txt
 
-      - name: Start Playit Tunnel (Expose UDP 51820)
+      - name: Start Public UDP Tunnel (Pinggy)
         run: |
-          # Run playit in the background and claim the tunnel automatically
-          playit setup --secret-path playit.secret &
-          sleep 5
+          # Create a public UDP tunnel via SSH (using port 443 to bypass firewall restrictions)
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p 443 -R 0:localhost:51820 udp@a.pinggy.io > pinggy.log 2>&1 &
           
-          # Create a custom UDP mapping to Wireguard
-          playit tunnel create --type udp --port 51820 --to-port 51820 &
-          sleep 5
-          
-          # Grab the public mapping address
-          playit status > playit.log 2>&1 || true
-          cat playit.log
+          echo "Waiting for public UDP endpoint..."
+          for i in {1..15}; do
+            sleep 2
+            # Extract the public URL (e.g. rnxxx-xxx.a.pinggy.link:xxxxx)
+            ENDPOINT=$(grep -oE '[a-zA-Z0-9.-]+\.pinggy\.link:[0-9]+' pinggy.log | head -n 1)
+            if [ -n "$ENDPOINT" ]; then 
+              echo "🌐 Public Endpoint Found: $ENDPOINT"
+              break
+            fi
+          done
+          echo "$ENDPOINT" > endpoint.txt
 
       - name: SHOW CONNECT INFO & GENERATE CONFIG
         run: |
           CLIENT_PRIV=$(cat client_private.txt)
           SERVER_PUB=$(cat server_public.txt)
-          
-          # Extract the tunnel mapping from the playit log
-          # (e.g. static-ip.playit.gg:12345)
-          ENDPOINT=$(grep -oE '[a-zA-Z0-9.-]+\.playit\.gg:[0-9]+' playit.log | head -n 1)
+          ENDPOINT=$(cat endpoint.txt)
+
+          if [ -z "$ENDPOINT" ]; then
+            echo "❌ Error: Could not obtain public endpoint. Checking tunnel logs:"
+            cat pinggy.log
+            exit 1
+          fi
 
           echo "==================================================="
           echo "       WIREGUARD VPN READY (NO CLIENT TUNNEL)"
           echo "==================================================="
-          echo "Tunnel Endpoint : $ENDPOINT"
+          echo "Public Endpoint : $ENDPOINT"
           echo "==================================================="
           echo ""
           echo "👉 Save this exact configuration as 'github-vpn.conf':"
@@ -102,9 +102,10 @@ jobs:
           echo ""
           echo "==================================================="
           echo "💡 HOW TO CONNECT:"
-          echo "1. Import 'github-vpn.conf' directly into your default"
-          echo "   WireGuard client (Mobile, Mac, Windows, Linux)."
-          echo "2. Click Connect. No helper software required!"
+          echo "1. Copy the configuration block above."
+          echo "2. Import it directly into the official WireGuard App on"
+          echo "   your phone, laptop, or router."
+          echo "3. Connect! All traffic now routes through the runner."
           echo "==================================================="
 
       - name: Keep Alive
