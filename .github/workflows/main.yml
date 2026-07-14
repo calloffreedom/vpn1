@@ -88,6 +88,8 @@ jobs:
               break
             fi
           done
+
+          cat loclx.log
           
           if [ -z "$ENDPOINT" ]; then
              echo "❌ Failed to obtain endpoint. Tunnel logs:"
